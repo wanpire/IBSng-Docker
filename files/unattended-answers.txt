@@ -1,0 +1,23 @@
+This documents the keystroke sequence setup.exp feeds into IBSng's
+interactive scripts/setup.py wizard on first container boot:
+
+  1   -> Install
+  2   -> Test DB Connection and Continue
+  2   -> Compile Configuration and Continue
+  1   -> Import Tables and Continue
+  <ADMIN_PASSWORD> -> the "system" admin account password
+  1   -> Copy ibs.conf to apache's config dir
+  2   -> Chown apache directories to the apache user (www-data on Debian)
+  5   -> Continue
+  1   -> Copy logrotate conf
+  3   -> Continue
+  1   -> Copy init file to /etc/init.d (harmless no-op in a container;
+         we run the daemon ourselves in entrypoint.sh instead)
+  2   -> Set IBSng to start on reboot (also a no-op in a container)
+  b   -> Back to main menu
+  x   -> Exit
+
+If the wizard doesn't fully take on first boot, check the transcript at
+/tmp/setup-wizard.log inside the container, and/or finish it by hand:
+
+  docker exec -it ibsng bash -c "TERM=linux python2.7 /usr/local/IBSng/scripts/setup.py"

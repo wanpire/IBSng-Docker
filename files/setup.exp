@@ -1,0 +1,35 @@
+#!/usr/bin/expect -f
+# Drives IBSng's curses-based setup.py wizard blind (by keystroke, with
+# small delays) since it redraws the whole screen instead of printing
+# line-based prompts we could pattern-match on.
+set timeout 60
+set admin_pass [lindex $argv 0]
+
+set env(TERM) linux
+
+spawn python2.7 /usr/local/IBSng/scripts/setup.py
+
+proc key {k {d 1.5}} {
+    send -- $k
+    sleep $d
+}
+
+key "1"            ;# Install
+key "2"            ;# Test DB Connection and Continue
+key "2"            ;# Compile Configuration and Continue
+key "1"            ;# Import Tables and Continue
+send -- "$admin_pass"
+sleep 1
+send -- "\r"        ;# submit admin password
+sleep 2
+key "1"            ;# Copy ibs.conf to apache config dir
+key "2"            ;# Chown apache directories (www-data)
+key "5"            ;# Continue
+key "1"            ;# Copy logrotate conf
+key "3"            ;# Continue
+key "1"            ;# Copy init file
+key "2"            ;# Set IBSng to start on reboot
+key "b"            ;# Back to main menu
+key "x"            ;# Exit
+
+expect eof
