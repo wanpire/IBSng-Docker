@@ -201,6 +201,104 @@ right after the source is fetched):
    (`//deprecated warnings`) makes the intent obvious, so corrected the
    constant too. Both are genuine bugs in IBSng's own error-handling
    bootstrap, not something introduced by this Docker packaging.
+7. **"Online Users" has no pagination — reported from production as "the
+   page shows nothing past ~800 online users," root-caused and fixed.**
+   `admin/report/online_users.php` renders every currently-online session
+   into one HTML table, unconditionally — `core/report/report_handler.py`'s
+   `getOnlineUsers()` always returned the *entire* online list, and the
+   PHP side had `ReportHelper` (the pagination helper class every *other*
+   report in this admin panel already uses) instantiated right there,
+   already computing `getFrom()`/`getTo()` — and never reading them. Not
+   a typo; a genuinely missing feature.
+
+   **Reproduced, not just inferred.** Built a small provisioning
+   harness (creates real users via the same `user.addNewUsers`/
+   `updateUserAttrs` XML-RPC calls the admin panel itself uses, assigns
+   each a real username/password, then drives real RADIUS
+   Access-Request/Accept traffic against the running daemon over UDP
+   1812 — genuinely online, not a DB row inserted directly) and ran it
+   against this image:
+   - At 800 concurrent online users (minimal per-session RADIUS
+     attributes): page rendered fine. Measured peak PHP memory 34MB
+     against the stock 128M `memory_limit` (a 0MB/0-online baseline
+     measured 0.75MB, so ~42.6KB of that is genuinely per-row).
+   - At ~3200: reliably reproduced a hard crash, with a real traceback
+     in `php.ini`'s `error_log`:
+     ```
+     PHP Fatal error:  Allowed memory size of 134217728 bytes exhausted
+     (tried to allocate 18528395 bytes) in
+     interface/smarty/plugins/block.listTable.php on line 54
+     ```
+     — Smarty's `listTable` block plugin buffers the whole table as one
+     string before returning it. Because `display_errors` is (correctly)
+     `Off`, this fatal produces exactly the reported symptom: HTTP 200,
+     a truncated near-empty body, nothing visible to the admin, nothing
+     in any IBSng-specific log — only in PHP's own `error_log`.
+   - The core side is not the bottleneck: building and sorting the full
+     XML-RPC response for 3200+ online sessions consistently took well
+     under a second (measured directly, bypassing PHP entirely).
+   - Production hitting this around ~800 rather than ~3200 is consistent
+     with real NAS hardware attaching more per-session RADIUS attributes
+     to each online record than this minimal synthetic test did (every
+     extra attribute is more data duplicated into each row's dict *and*
+     into that row's hidden "details" popup in the same template) — but
+     the exact per-row size was never really the point: with **no bound
+     at all**, *some* online count will always eventually exhaust
+     `memory_limit`, whatever that count turns out to be on a given
+     deployment.
+
+   **Fix** (deliberately not "raise `memory_limit`" — that only moves
+   the threshold, it doesn't remove the unbounded growth that gets you
+   there): `getOnlineUsers()` now takes `from`/`to` (the same convention
+   every *other* paginated report method in `core/` already uses, e.g.
+   `getConnections`) and slices the already-sorted result before
+   returning it, so the response size is capped regardless of true
+   online count; the PHP caller now actually uses the `from`/`to`
+   `ReportHelper` was already computing; the template shows a total
+   count plus the same `{reportPages}` page-nav widget every other
+   paginated report page in this admin panel already uses. Defaults to
+   100 rows/page (overridable via the standard `?page=N&rpp=N`
+   convention).
+
+   **A second bug found while wiring this up, also fixed:**
+   `{reportPages}`'s own generated "page 2" links don't actually work
+   *anywhere* in stock IBSng — `ReportHelper` only reads `page`/`rpp`
+   from the request when *both* are present, and nothing anywhere ever
+   seeds a default `rpp`, so clicking "next page" silently does nothing,
+   forever, on every report that uses this exact (otherwise standard)
+   pagination convention. Worked around locally on this page only
+   (default `$_REQUEST["rpp"]` once, up front, if absent) rather than
+   touching the shared plugin — fixing that globally is a separate,
+   larger, riskier change outside this bug's scope, and every other
+   paginated report was already shipping with this same limitation
+   before this pass, so it isn't a regression.
+
+   **Re-verified after the fix, same harness, 3200 concurrent online
+   users:** page renders in well under half a second, shows the correct
+   total (verified against the real online count), and real
+   `{reportPages}`-generated links (not hand-built URLs) correctly page
+   through *distinct* sets of users (page 1: the 100 most-recently-
+   logged-in; page 2: the next 100; etc.) with zero errors in any log.
+
+   **Safe up to / next bottleneck:** the render cost is now decoupled
+   from true online count entirely — it's bounded to a fixed page size
+   (100 rows) no matter whether 800, 3,200, or 50,000 users are
+   genuinely online, so there's no longer a PHP-memory ceiling to give a
+   number for. Tested clean at 3,200 (4x the originally reported failure
+   point, and comfortably past where the *unfixed* code provably broke).
+   The next real bottleneck at much larger scale wouldn't be this page's
+   render at all — it'd be `getOnlineUsers()` itself: it still sorts the
+   *entire* online list (Python-side, O(N log N)) before slicing, on
+   every single page load *and* every 20-second auto-refresh tick, for
+   every admin who has this page open. That cost is still small at
+   today's scale (well under a second at 3,200, sorting pure in-memory
+   dicts), but it isn't zero and it isn't cached — at a much larger ISP
+   (very roughly, tens of thousands of simultaneously-online sessions,
+   extrapolating from the 3,200 timing with margin, not directly tested),
+   it would show up first as slower page loads / heavier core-daemon CPU
+   under many concurrent admin viewers, not as a crash. That'd be the
+   point to consider caching the sorted online list for a few seconds
+   between requests, rather than re-sorting it fresh on every refresh.
 
 **A new log file worth knowing about:** `core/ibs_exceptions.py`
 routes `logException(LOG_ERROR, ...)` to `/var/log/IBSng/ibs_error.log`

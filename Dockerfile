@@ -236,6 +236,71 @@ RUN sed -i 's/self\.getLoadedUsersByUsername(normal_username)/self.getLoadedUser
         -e 's/new Generator(/new IBSngGenerator(/g' \
         -e 's/instanceof Generator\b/instanceof IBSngGenerator/g'
 
+# 9) "Online Users" admin page (admin/report/online_users.php) has no
+#    pagination at all: core/report/report_handler.py's getOnlineUsers()
+#    always returns every currently-online session, and the page renders
+#    every one of them into a single HTML table unconditionally. This is
+#    a genuine architectural gap, not a typo — ReportHelper (the same
+#    helper class every OTHER paginated report in this admin panel uses)
+#    is already instantiated on this exact page for order_by/desc, and
+#    was already computing getFrom()/getTo() the whole time — they were
+#    simply never read. REPRODUCED (not just inferred): provisioned real
+#    users and drove real RADIUS Access-Accept + this-page-load traffic
+#    against a running instance of this image. At 800 concurrent online
+#    users (minimal per-session RADIUS attributes) the page still
+#    rendered fine, ~34MB peak PHP memory against the stock 128M
+#    memory_limit. At ~3200 it reliably hit:
+#      PHP Fatal error: Allowed memory size of 134217728 bytes exhausted
+#      (tried to allocate 18528395 bytes) in
+#      interface/smarty/plugins/block.listTable.php on line 54
+#    — i.e. Smarty's listTable block plugin buffers the entire table as
+#    one string before returning it, so memory grows without bound as
+#    online count grows, with no cap anywhere in the chain. Because
+#    display_errors is (correctly, see above) Off, this fatal error
+#    produces exactly the reported symptom: page returns 200 with a
+#    truncated, near-empty body and no visible error — the real error
+#    only shows up in php.ini's own error_log. (The core side is not the
+#    bottleneck: building and returning the full XML-RPC response for
+#    3200+ sessions took well under a second in testing.) A production
+#    deployment hitting this around ~800 rather than ~3000+ is consistent
+#    with real NAS hardware attaching more per-session RADIUS attributes
+#    per online record than this minimal synthetic test did (each extra
+#    attribute is more data duplicated into every row's in-memory dict
+#    AND into the per-row hidden "details" popup in the same template) —
+#    the exact per-row byte size isn't what matters here, since it's
+#    fundamentally an unbounded-growth bug: whatever the real per-row
+#    cost is, *some* online count will always eventually exhaust
+#    memory_limit without a cap somewhere. Fixed at the actual source of
+#    the unbounded growth rather than by raising memory_limit (which
+#    would only move the threshold, not remove it): report_handler.py's
+#    getOnlineUsers() now takes "from"/"to" (same convention as every
+#    other paginated report method in core/, e.g. getConnections) and
+#    slices the already-sorted result before returning it, so the
+#    response size is bounded regardless of true online count; the PHP
+#    caller now actually uses the from/to ReportHelper was already
+#    computing, and the template shows total-count + the same
+#    {reportPages} page-nav widget every other paginated report page in
+#    this admin panel already uses. Defaults to 100 rows/page. Also
+#    fixed, while wiring this up: {reportPages}'s own generated "page 2"
+#    links never actually work anywhere in IBSng unless "rpp" already
+#    happens to be in the request (ReportHelper only reads page/rpp when
+#    BOTH are present, and nothing anywhere ever seeds "rpp" by default)
+#    — a real, pre-existing bug affecting every other page that already
+#    uses this same pagination convention, not something new. Worked
+#    around locally (defaulting $_REQUEST["rpp"] once, up front, on this
+#    page only) rather than touching the shared plugin, since fixing that
+#    globally is a separate, riskier change outside this bug's scope.
+#    See README.md for the full before/after numbers, verification at
+#    3200+ concurrent online users, and the safe-up-to figure this leaves
+#    the page at.
+COPY files/patches/paginate_online_users.py files/patches/paginate_online_users_funcs.py /tmp/patches/
+RUN python2.7 /tmp/patches/paginate_online_users.py \
+    && python2.7 /tmp/patches/paginate_online_users_funcs.py \
+    && sed -i 's/function GetOnlineUsers(\$normal_sort_by, \$normal_desc, \$voip_sort_by, \$voip_desc, \$conds)/function GetOnlineUsers($normal_sort_by, $normal_desc, $voip_sort_by, $voip_desc, $conds, $from, $to)/' /usr/local/IBSng/interface/IBSng/inc/report.php \
+    && sed -i 's/^                                                      "conds"=>\$conds));$/                                                      "conds"=>$conds,\n                                                      "from"=>(int)$from,\n                                                      "to"=>(int)$to));/' /usr/local/IBSng/interface/IBSng/inc/report.php \
+    && printf '\n<div align=center>\n    Total Internet Online Users: {$internet_onlines_total}\n    <br>\n    {reportPages total_results=$internet_onlines_total ignore_in_url="voip_order_by,voip_desc"}\n</div>\n' >> /usr/local/IBSng/interface/smarty/templates/admin/report/internet_onlines.tpl \
+    && rm -rf /tmp/patches
+
 COPY files/ibsng-apache.conf /etc/apache2/conf-available/ibsng.conf
 RUN a2enconf ibsng \
     && a2enmod php5 rewrite || true
