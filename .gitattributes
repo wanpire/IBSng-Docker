@@ -1,0 +1,8 @@
+# Force LF line endings regardless of a contributor's local core.autocrlf.
+# files/entrypoint.sh and files/setup.exp get COPY'd straight into the
+# Linux image and run via their #!/bin/bash / #!/usr/bin/expect shebang;
+# a Windows checkout with core.autocrlf=true silently rewrites them to
+# CRLF, which breaks the shebang line and fails as a confusing
+# "exec /entrypoint.sh: no such file or directory" with no other clue —
+# discovered while build-testing this repo on Windows.
+* text=auto eol=lf

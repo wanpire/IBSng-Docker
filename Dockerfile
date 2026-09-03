@@ -44,6 +44,29 @@ RUN apt-get install -y --no-install-recommends \
         procps net-tools iproute2 sudo \
     && rm -rf /var/lib/apt/lists/*
 
+# IBSng's own error pages actively hide the real cause of a failure (both
+# xmlrpc.inc's generic "Can't connect to IBS Core" wrapper and Smarty's
+# silent-blank-page behavior), so PHP's own error log is often the only
+# place a fatal actually surfaces. Set this explicitly rather than trust
+# Debian's packaged default, which points error_log at a path
+# (/var/log/php5/error.log) that isn't necessarily writable by www-data
+# out of the box. display_errors stays Off — this is a production panel.
+# error_log is deliberately appended rather than sed-replaced in place:
+# Debian's stock php.ini has TWO commented "Example:" lines for error_log
+# (one for a file path, one for syslog) — a blanket sed on that pattern
+# turns both into live, duplicate directives. Appending one unambiguous
+# line at the end of the file relies on PHP's normal ini behavior (last
+# occurrence of a duplicate directive wins) to guarantee a single,
+# unambiguous value regardless of what the stock file already contains.
+RUN sed -i \
+        -e 's/^;\?display_errors\s*=.*/display_errors = Off/' \
+        -e 's/^;\?log_errors\s*=.*/log_errors = On/' \
+        /etc/php5/apache2/php.ini \
+    && echo 'error_log = /var/log/php5/error.log' >> /etc/php5/apache2/php.ini \
+    && mkdir -p /var/log/php5 \
+    && touch /var/log/php5/error.log \
+    && chown -R www-data:www-data /var/log/php5
+
 RUN sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
     && locale-gen \
     && update-locale LANG=en_US.UTF-8
@@ -83,7 +106,117 @@ RUN wget -L -O /tmp/ibsng.tar.bz2 "$IBSNG_URL" \
 #    Generator class (used for `yield`) — rename IBSng's own class
 # 3) Smarty's compiled-template cache dir must be writable by Apache
 #    (www-data), or pages render as a silent, error-free blank page
-RUN sed -i '1i #coding:utf-8' /usr/local/IBSng/core/lib/IPy.py \
+# 4) upstream typo bug (confirmed via `grep -rn "def getLoadedUsersByUsername"`
+#    across core/ returning nothing): UserActions.getUserInfoByNormalUsername()
+#    calls self.getLoadedUsersByUsername(), a method that has never existed
+#    anywhere in IBSng's own source. The real method, defined a few lines
+#    above in the same class, is getLoadedUsersByNormalUsername(). NOTE: as
+#    of the SourceForge "latest" snapshot this Dockerfile currently pulls,
+#    getUserInfoByNormalUsername() itself is not registered with any XML-RPC
+#    handler (core/user/user_handler.py's UserHandler only exposes
+#    getUserInfo/searchUser/etc, both of which already call the correctly-
+#    spelled getLoadedUsersByNormalUsername directly) — so this exact call
+#    is currently dead code, not the live cause of a username-search
+#    failure on this snapshot. Fixed anyway since it's a genuine bug that
+#    would throw AttributeError the moment anything does call it (directly,
+#    or in a different IBSng build/version where it may be wired up).
+# 5) same class of upstream typo, found by a systematic self.<method>()
+#    call/definition cross-reference across all of core/ — two more calls
+#    to methods that don't exist anywhere:
+#      - ibs_db.py:154 self.getDictWrapperResult() -> real method (line 162,
+#        same class) is getDicWrapperResult() (missing "t"). Currently dead:
+#        it's only reached via selectQuery(query, result_type=2), and no
+#        caller in core/ ever passes result_type=2 — but it would throw
+#        AttributeError the moment something does.
+#      - rases/portmaster.py:51,75,78 self.__getPortFromOid() -> real method
+#        (line 58, same class) is __getPortFromOID() (case mismatch only,
+#        so Python treats them as distinct names). This one is LIVE: it's
+#        on the periodic online-user/traffic-polling path for any RAS
+#        configured with type "PortMaster" (core/ras/ras.py's
+#        UpdateUsersRas.updateUserList()/updateInOutBytes(), invoked by the
+#        core daemon's periodic-event scheduler). The exception is caught
+#        and logged by core/event/periodic_events.py rather than crashing
+#        the daemon, so the failure mode is silent: a PortMaster RAS never
+#        tracks online users or in/out byte counters, and the only symptom
+#        is a steady stream of AttributeErrors in the core daemon's log
+#        every polling cycle.
+# 6) missing require_once, found by actually exercising Add New User in a
+#    browser against a freshly built image (not by static analysis, which
+#    can't see this class of bug — it only checks whether a definition
+#    exists ANYWHERE in the tree, not whether the calling file's own
+#    require chain can reach it). admin/plugins/edit_funcs.php's
+#    editUserAssignValues() calls intSetSingleUserInfo(),
+#    intShowSingleUserInfoInput(), and intSetSingleUserGroupAttrs() — all
+#    three defined in admin/user/user_info_funcs.php, which edit_funcs.php
+#    never requires. It happens to work when reached from a page that
+#    already required user_info_funcs.php first, but edit_funcs.php's other
+#    two callers (add_new_users.php's post-create redirect to plugins/edit.php,
+#    and search_user_edit.php's single-user Edit action) don't — reliably
+#    reproduced via Add New User with a single user (count=1): fatal error
+#    "Call to undefined function intShowSingleUserInfoInput()". Fixed by
+#    adding the require, matching the existing cross-directory require
+#    convention already used elsewhere in admin/ (relative to the
+#    including file's own directory, e.g. add_new_users.php's own
+#    `require_once("../plugins/edit_funcs.php")`).
+# 7) interface/IBSng/inc/error.php (loaded on every single admin-panel
+#    request) unconditionally runs `ini_set("display_errors",1)` — this
+#    silently overrides whatever php.ini says (see the log_errors/
+#    display_errors/error_log block earlier in this file) on every
+#    request, so display_errors was never actually Off in practice.
+#    Caught by actually hitting a page that triggers a PHP notice (the
+#    pre-existing, deliberately-left-alone `=& new` deprecated syntax in
+#    inc/generator/report_generator/csv_report_generator.php — see
+#    README) and seeing it rendered straight into the admin UI. Removed
+#    the ini_set so php.ini's Off actually takes effect. Also fixed a typo
+#    a few lines below it in the same file: errorHandler()'s "don't log
+#    deprecated warnings" check compares `$errno!=2048`, but 2048 is
+#    E_STRICT, not E_DEPRECATED (8192) — the comment ("//deprecated
+#    warnings") makes the intent clear, so corrected the constant. Both
+#    are genuine bugs in IBSng's own error-handling bootstrap, not
+#    something introduced by this Docker packaging.
+# 8) severe, high-impact bug found by actually completing "Add New User"
+#    end to end in a browser (not by any static analysis — this is a
+#    runtime type-marshalling failure with no trace in the source text):
+#    core/server/xmlrpcserver.py's do_POST serializes a successful
+#    handler's return value with `xmlrpclib.dumps(response,
+#    methodresponse=1)`. Python 2's stdlib xmlrpclib has no marshaller
+#    for `decimal.Decimal`, and PyGreSQL returns NUMERIC/DECIMAL Postgres
+#    columns (credit, charges, any money field — pervasive in a billing
+#    system) as Decimal. The instant a response contains one anywhere in
+#    its structure, dumps() raises TypeError; this happens AFTER the
+#    handler already ran successfully and OUTSIDE the try/except that
+#    turns real handler errors into a proper XML-RPC fault (verified: a
+#    HandlerException raised from inside a handler comes back as a
+#    correct `FAULT: ...` string, but this TypeError does not), so it
+#    falls into do_POST's outermost bare `except:` and returns a bare
+#    HTTP 500 with an empty body — indistinguishable, from the PHP
+#    client's side, from the "Can't connect to IBS Core" symptom
+#    documented for the user_actions.py bug above. Confirmed via the
+#    direct-XML-RPC-test technique (calling user.getUserInfo directly)
+#    and by reading /var/log/IBSng/ibs_error.log — a log file the admin
+#    panel's own debugging notes don't mention, but which is exactly
+#    where logException(LOG_ERROR,...) writes
+#    (core/ibs_exceptions.py's toLog): it had the full Python traceback
+#    ending in "TypeError: cannot marshal <class 'decimal.Decimal'>
+#    objects". Reliably reproduced by adding a single user with any
+#    credit value (including 0) and viewing the resulting user info page
+#    — i.e. this breaks the Add New User flow for essentially everyone.
+#    Fixed the way IBSng's own PyGreSQL shim above is fixed: register a
+#    marshaller for decimal.Decimal (convert to float, then reuse
+#    xmlrpclib's existing dump_double) in core/server/xmlrpcserver.py,
+#    the one module that owns response serialization, so it runs once
+#    at daemon startup and applies to every response for the life of the
+#    process.
+RUN sed -i 's/self\.getLoadedUsersByUsername(normal_username)/self.getLoadedUsersByNormalUsername(normal_username)/' /usr/local/IBSng/core/user/user_actions.py \
+    && sed -i 's/self\.getDictWrapperResult(result)/self.getDicWrapperResult(result)/' /usr/local/IBSng/core/db/ibs_db.py \
+    && sed -i 's/self\.__getPortFromOid(/self.__getPortFromOID(/g' /usr/local/IBSng/core/ras/rases/portmaster.py \
+    && sed -i '0,/^require_once(IBSINC."group.php");/s//require_once("..\/user\/user_info_funcs.php");\n&/' /usr/local/IBSng/interface/IBSng/admin/plugins/edit_funcs.php \
+    && sed -i \
+        -e '/^ini_set("display_errors",1);$/d' \
+        -e 's/if(\$errno!=2048)/if($errno!=8192)/' \
+        /usr/local/IBSng/interface/IBSng/inc/error.php \
+    && printf '\n# --- IBSng compatibility shim: xmlrpclib (Python 2 stdlib) cannot marshal\n# decimal.Decimal, which PyGreSQL returns for Postgres NUMERIC/DECIMAL\n# columns (credit, charges, ...). Without this, any response containing\n# one crashes serialization with an uncaught TypeError, surfacing to the\n# PHP admin panel as a bare HTTP 500 with no fault string. ---\nimport decimal as _ibsng_decimal\ndef _ibsng_dump_decimal(self, value, write):\n    self.dump_double(float(value), write)\nxmlrpclib.Marshaller.dispatch[_ibsng_decimal.Decimal] = _ibsng_dump_decimal\n# --- end shim ---\n' >> /usr/local/IBSng/core/server/xmlrpcserver.py \
+    && sed -i '1i #coding:utf-8' /usr/local/IBSng/core/lib/IPy.py \
     && sed -i '1i #coding:utf-8' /usr/local/IBSng/core/lib/mschap/des_c.py \
     && chmod +x /usr/local/IBSng/scripts/setup.py /usr/local/IBSng/ibs.py \
     && mkdir -p /var/log/IBSng \
