@@ -29,11 +29,18 @@ RUN printf 'deb [trusted=yes] http://archive.debian.org/debian jessie main\ndeb 
 # symlink man pages into them) and fails otherwise — recreate them first
 RUN mkdir -p /usr/share/man/man1 /usr/share/man/man7
 
-# apache2 + native PHP 5.6 — the version IBSng was actually written for
+# apache2 + native PHP 5.6 — the version IBSng was actually written for.
+# php5-gd is required for every graph/chart page (RealTime graphs, BW
+# graph, Onlines graph, Connection Analysis) — IBSng's jpgraph library
+# needs the GD extension to render PNGs. Without it every graph image
+# request 200s with a tiny JpGraph error body instead of an image
+# ("This PHP installation is not configured with the GD library"),
+# which just renders as a broken-image icon in the browser with no
+# obvious error anywhere in the admin panel itself.
 RUN apt-get install -y --no-install-recommends \
         apache2 \
         libapache2-mod-php5 \
-        php5-cli php5-pgsql php5-cgi \
+        php5-cli php5-pgsql php5-cgi php5-gd \
         postgresql postgresql-contrib \
         python2.7 \
         python-pygresql \

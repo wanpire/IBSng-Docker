@@ -64,6 +64,17 @@ targets. Only the fixes below remain necessary.
    ourselves, rather than `service postgresql start` / the
    `pg_createcluster` machinery, which doesn't know about a
    hand-initialized data directory.
+7. **`php5-gd`** — every graph/chart page (RealTime graphs, BW graph,
+   Onlines graph, Connection Analysis) depends on IBSng's bundled
+   `jpgraph` library, which needs PHP's GD extension to render PNGs.
+   Without `php5-gd` installed, every graph image request still
+   returns HTTP 200, just with a ~200-byte JpGraph error body ("This
+   PHP installation is not configured with the GD library...") instead
+   of an image — which just renders as a silent broken-image icon in
+   the browser, with nothing wrong-looking anywhere else in the admin
+   panel. Found by actually opening a graph page against a built image
+   and checking the image request's response body/`Content-Type`
+   directly rather than trusting the HTTP status code.
 
 None of the PHP7-era patches (`ereg`, `split`, `&new`, `class Error`)
 are needed on this base — they were purely PHP7 breaking changes.
@@ -290,19 +301,20 @@ volume. `Update` (option 5) rebuilds the image without touching it.
 ## Before going live: test checklist
 
 Items marked ✅ were verified locally (Docker Desktop, this build) as
-part of the bug-hunt pass above — login, create group, Add New User
-(single, with an Internet username/password), Search User by username,
-Change Credit, and the Credit Change report with `SUM()` totals all
-confirmed working end to end. Everything else still needs exercising —
-ideally against the real target server, since some of it (RADIUS,
-restart/reboot resilience) can't be meaningfully tested any other way.
+part of the bug-hunt pass above. Everything else still needs
+exercising — ideally against the real target server, since some of it
+(a full RADIUS Access-Accept with a real NAS/session, restart/reboot
+resilience) needs more setup depth or hardware this local pass didn't
+cover.
 
 - ✅ Login/logout — ⬜ a second restricted admin account, permission enforcement
-- ✅ Add New Users (single) — ⬜ bulk — ✅ Search User — ⬜ edit user (expiry/group) — ✅ edit user (credit) — ⬜ lock/unlock, kill session, delete
-- ✅ Groups: create — ⬜ edit/delete; Charges: create/edit/delete (internet + VoIP if used)
-- IP Pool: create pool, add/remove IPs, assign to group
-- Reports (connection logs, CSV export) and graphs (realtime/onlines)
-- RADIUS auth against a real test user:
+- ✅ Add New Users (single) — ⬜ bulk — ✅ Search User — ⬜ edit user (expiry/group) — ✅ edit user (credit) — ✅ lock/unlock — ⬜ kill session — ✅ delete
+- ✅ Groups: create — ⬜ edit/delete; ✅ Charges: create (+ an Internet Charge Rule) — ⬜ edit/delete (VoIP if used)
+- ✅ IP Pool: create pool, add IPs (note: use real keystrokes, not a
+  programmatic value-set, when testing this field — it's a MultiStr
+  input whose JS sync doesn't fire on a raw value assignment) — ⬜ remove IPs, assign to group
+- ✅ Reports: Credit Change report with `SUM()` totals — ⬜ connection logs, CSV export — ✅ graphs: confirmed a RealTime "Onlines" graph now renders a real PNG (see the `php5-gd` fix above — before that fix, every graph silently 200'd with a JpGraph text error instead of an image)
+- RADIUS: ✅ registered a RAS (type PortMaster, matching the fix above) and confirmed the daemon responds correctly over UDP 1812 with the right shared secret, and correctly sends `Access-Reject` for a locked user. Did not chase a full `Access-Accept` — that needs more account/charge setup than a quick smoke test warrants. Against a real target server:
   ```bash
   apt-get install -y freeradius-utils
   echo "User-Name=<test-user>,User-Password=<test-pass>" | radclient -x 127.0.0.1:1812 auth testing123
