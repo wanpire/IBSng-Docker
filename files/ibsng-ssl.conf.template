@@ -1,0 +1,18 @@
+# HTTPS vhost for the IBSng admin panel. Rendered from this template by
+# entrypoint.sh at container startup (SERVER_DOMAIN substituted in) —
+# only enabled once a real cert is found at
+# /etc/letsencrypt/live/${SERVER_DOMAIN}/, so this file is never active
+# with a missing cert path (Apache would refuse to start otherwise).
+<IfModule mod_ssl.c>
+<VirtualHost *:443>
+    ServerName __SERVER_DOMAIN__
+    DocumentRoot /var/www/html
+
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/__SERVER_DOMAIN__/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/__SERVER_DOMAIN__/privkey.pem
+
+    ErrorLog ${APACHE_LOG_DIR}/ssl_error.log
+    CustomLog ${APACHE_LOG_DIR}/ssl_access.log combined
+</VirtualHost>
+</IfModule>

@@ -45,7 +45,7 @@ RUN apt-get install -y --no-install-recommends \
         python2.7 \
         python-pygresql \
         python-openssl \
-        locales \
+        locales tzdata \
         expect ncurses-base \
         wget bzip2 ca-certificates \
         procps net-tools iproute2 sudo \
@@ -78,6 +78,37 @@ RUN sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
     && locale-gen \
     && update-locale LANG=en_US.UTF-8
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+# Both production servers this image runs on are in Iran — bake the
+# timezone in at build time (not just a live post-install fix) so every
+# future `ibsng-manager.sh` install/reinstall gets it automatically,
+# without anyone needing to remember a manual step. Affects every
+# container-internal timestamp: Apache/PHP logs, Postgres logs, and
+# IBSng's own core daemon log (ibs_debug.log etc).
+#
+# Deliberately NOT `TZ=Asia/Tehran` + the usual /etc/localtime symlink:
+# this base image's `tzdata` package is frozen at Debian jessie's ~2015
+# vintage (consistent with the rest of this Dockerfile's jessie pin —
+# see the top-of-file comment on why), and that vintage's Asia/Tehran
+# zoneinfo still encodes Iran's PRE-2022 seasonal DST rule as a
+# perpetual rule with no end date (confirmed via `zdump -v`: it projects
+# DST transitions all the way out to the year 2499). Iran abolished DST
+# in real life; this stale rule doesn't know that, so `TZ=Asia/Tehran`
+# on this image is wrong for roughly half of every year (+04:30 instead
+# of the correct +03:30). Recompiling the zone from a current IANA
+# tzdata release isn't a viable fix either — this image's `zic` is the
+# same ~2015 vintage and can't parse newer tzdata source syntax.
+# Instead, use a POSIX fixed-offset TZ string, which bypasses the
+# zoneinfo database entirely: always +03:30, never DST, matching Iran's
+# actual current policy regardless of what this old tzdata package
+# thinks the rule is. (POSIX TZ strings invert the sign — "-3:30" here
+# means "3.5 hours EAST of UTC", i.e. what everyone else calls +03:30.)
+# NOTE for anyone reading old logs after this change ships: every
+# timestamp written before this Dockerfile revision is in UTC, not
+# +03:30 — worth remembering when correlating old and new log lines
+# across the changeover point.
+ENV TZ='<+0330>-3:30'
+RUN echo "Asia/Tehran" > /etc/timezone
 
 # the postgresql package auto-creates a default cluster during install —
 # wipe it so the image ships with a clean, empty /var/lib/postgresql and
@@ -329,13 +360,42 @@ COPY files/ibsng-apache.conf /etc/apache2/conf-available/ibsng.conf
 RUN a2enconf ibsng \
     && a2enmod php5 rewrite || true
 
+# 11) HTTPS support (Let's Encrypt), added without baking any
+#    domain name or secret into the image — see README/HA.md for the
+#    full rationale. Only `a2enmod ssl` happens at build time (harmless:
+#    it just makes port 443 available and loads mod_ssl; ports.conf's
+#    stock `<IfModule ssl_module> Listen 443 </IfModule>` picks it up
+#    automatically). The actual HTTPS vhost is a *template*
+#    (ibsng-ssl.conf.template, __SERVER_DOMAIN__ placeholder) rendered
+#    and enabled by entrypoint.sh at container startup, and ONLY if a
+#    real cert is found mounted in at
+#    /etc/letsencrypt/live/${SERVER_DOMAIN}/ — never unconditionally, so
+#    a fresh container with no cert yet (or no SERVER_DOMAIN set at all)
+#    still starts cleanly on plain HTTP, which is also what a brand-new
+#    server needs anyway before certbot's webroot challenge can even run
+#    (chicken-and-egg: can't validate domain ownership over HTTPS before
+#    a cert exists). ibsng-http-redirect.conf is the matching plain-HTTP
+#    vhost for once a cert DOES exist — redirects everything to HTTPS
+#    except /.well-known/acme-challenge/, so certbot's periodic renewal
+#    (always over plain HTTP) keeps working indefinitely, not just for
+#    the first issuance. See ibsng-manager.sh for the docker run side
+#    (the `-e SERVER_DOMAIN=`, `-p 443:443`, and the two required host
+#    bind mounts: the webroot directory for challenge files, and the
+#    host's whole /etc/letsencrypt directory, mounted read-only at the
+#    same absolute path so the `live/<domain>/*.pem` symlinks it
+#    contains — which point at sibling `../../archive/<domain>/...`
+#    paths — still resolve correctly inside the container).
+COPY files/ibsng-ssl.conf.template files/ibsng-http-redirect.conf /etc/apache2/sites-available/
+RUN a2enmod ssl
+
 COPY files/setup.exp /usr/local/IBSng/scripts/setup.exp
 COPY files/entrypoint.sh /entrypoint.sh
 COPY files/unattended-answers.txt /usr/local/IBSng/scripts/unattended-answers.txt
 RUN chmod +x /entrypoint.sh /usr/local/IBSng/scripts/setup.exp
 
-# Web (admin panel), XML-RPC API, RADIUS auth, RADIUS accounting
-EXPOSE 80/tcp 1235/tcp 1812/udp 1813/udp
+# Web (admin panel, plain HTTP or HTTPS depending on SERVER_DOMAIN/cert
+# state — see note 11 above), XML-RPC API, RADIUS auth, RADIUS accounting
+EXPOSE 80/tcp 443/tcp 1235/tcp 1812/udp 1813/udp
 
 # Postgres data lives here so a named volume makes it persistent
 VOLUME ["/var/lib/postgresql"]

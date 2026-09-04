@@ -64,6 +64,26 @@ else
     log "IBSng already installed — skipping setup wizard."
 fi
 
+# HTTPS: only touched if SERVER_DOMAIN is set AND a real cert for it is
+# mounted in (see Dockerfile note 11 and ibsng-manager.sh). Re-evaluated
+# on every container start, so a cert obtained *after* first install
+# (or a container recreated without one) both self-correct automatically
+# — no manual apache config step to remember on top of running certbot.
+CERT_DIR="/etc/letsencrypt/live/${SERVER_DOMAIN:-__unset__}"
+if [ -n "${SERVER_DOMAIN:-}" ] && [ -f "${CERT_DIR}/fullchain.pem" ] && [ -f "${CERT_DIR}/privkey.pem" ]; then
+    log "TLS cert found for ${SERVER_DOMAIN} — enabling HTTPS + HTTP->HTTPS redirect."
+    sed "s/__SERVER_DOMAIN__/${SERVER_DOMAIN}/g" /etc/apache2/sites-available/ibsng-ssl.conf.template \
+        > /etc/apache2/sites-available/ibsng-ssl.conf
+    a2dissite 000-default >/dev/null 2>&1 || true
+    a2ensite ibsng-http-redirect ibsng-ssl >/dev/null
+else
+    if [ -n "${SERVER_DOMAIN:-}" ]; then
+        log "SERVER_DOMAIN=${SERVER_DOMAIN} set but no cert found at ${CERT_DIR} yet — serving plain HTTP only (run certbot against the mounted webroot, then restart this container)."
+    fi
+    a2dissite ibsng-http-redirect ibsng-ssl >/dev/null 2>&1 || true
+    a2ensite 000-default >/dev/null 2>&1 || true
+fi
+
 log "starting Apache..."
 apache2ctl start || { err "Apache failed to start. Log:"; tail -n 50 /var/log/apache2/error.log 2>/dev/null; exit 1; }
 
