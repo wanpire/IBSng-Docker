@@ -301,6 +301,30 @@ RUN python2.7 /tmp/patches/paginate_online_users.py \
     && printf '\n<div align=center>\n    Total Internet Online Users: {$internet_onlines_total}\n    <br>\n    {reportPages total_results=$internet_onlines_total ignore_in_url="voip_order_by,voip_desc"}\n</div>\n' >> /usr/local/IBSng/interface/smarty/templates/admin/report/internet_onlines.tpl \
     && rm -rf /tmp/patches
 
+# 10) the SourceForge release tarball ships interface/smarty/templates_c/
+#    pre-populated with Smarty's own compiled-template cache from whenever
+#    the upstream maintainers last rendered these pages themselves —
+#    Smarty only recompiles a cached .tpl.php when its source .tpl is
+#    newer than the compiled copy, so any of these stale entries whose
+#    source .tpl this Dockerfile patches above (or whose PHP controller
+#    the sed/patch steps above touch) keep silently serving pre-patch
+#    output forever, with no error anywhere (Smarty's cache check is
+#    silent by design). REPRODUCED against a real deployment: the Search
+#    User page's "Attributes to Edit" checkboxes never showed their
+#    correct default-checked set, and the Home page's Report menu was
+#    missing the "Deposit Changes" link entirely — both confirmed to
+#    correspond to a compiled templates_c/*.tpl.php that visibly lacked
+#    content present in the actual current source .tpl. Fixed by clearing
+#    every pre-baked compiled template after all patches above are
+#    applied, so the very first request against a fresh container
+#    recompiles from the final, patched source instead of whatever the
+#    upstream tarball happened to ship. This costs a one-time recompile
+#    per template on first access after container start — negligible,
+#    and it also means a `docker restart` never has stale content to
+#    worry about (Smarty writes back into this same, persistent-within-
+#    the-image directory).
+RUN find /usr/local/IBSng/interface/smarty/templates_c -mindepth 1 -delete
+
 COPY files/ibsng-apache.conf /etc/apache2/conf-available/ibsng.conf
 RUN a2enconf ibsng \
     && a2enmod php5 rewrite || true
