@@ -17,6 +17,8 @@ scripts use). Replace if yours differs.
 
 ## §1 Quick status check
 
+> **`ibsng-ops.sh` → option 3.**
+
 Four things, together — a container showing `Up` does **not** mean the
 core daemon inside it is healthy; the daemon has crashed while the
 container kept running before, so check all four, not just the first.
@@ -42,6 +44,9 @@ docker exec ibsng bash -c 'ps -p $(cat /var/run/IBSng.pid) -o pid,cmd --no-heade
 ```
 
 ## §2 Restarting the core daemon (RADIUS + XML-RPC)
+
+> **`ibsng-ops.sh` → option 1.** Implements every step below, including
+> the port-1235-free check and the log confirmation.
 
 `ibs.py` double-forks: the launcher process exits(0) once the forked
 child confirms startup. Two known ways to break this:
@@ -79,6 +84,9 @@ docker exec ibsng tail -10 /var/log/IBSng/ibs_debug.log
 
 ## §3 Restarting the web server (Apache)
 
+> **`ibsng-ops.sh` → option 2.** Asks which of the two below, doesn't
+> pick one silently.
+
 Two options, in order of preference:
 
 - **`apache2ctl graceful`** (default/first choice) — reloads config
@@ -100,6 +108,9 @@ docker exec ibsng apache2ctl restart
 Neither of these touches the core daemon (§2) — they're independent.
 
 ## §4 Clearing cache & logs (periodic maintenance)
+
+> **`ibsng-ops.sh` → option 4.** Also reports the `/var/log/IBSng`
+> size before/after so you can see what was actually reclaimed.
 
 This is the same procedure the 12-hour cron job on Active runs
 automatically (`files/ibsng-cleanup-backup-sync.sh`, see `HA.md`) —
@@ -132,6 +143,11 @@ docker exec ibsng bash -c 'find /var/log/IBSng -type f -exec truncate -s 0 {} \;
 ```
 
 ## §5 Restoring a backup ⚠️ destructive
+
+> **`ibsng-ops.sh` → option 6.** Lists available backup files, requires
+> typing the word `restore` to proceed (not just y/n), and checks the
+> restore output for errors before declaring success — same as below,
+> just driven from a menu instead of typed by hand.
 
 **This permanently deletes everything currently in this server's
 `IBSng` database and replaces it with the selected backup file.**
@@ -200,6 +216,9 @@ docker exec ibsng rm -f /tmp/restore.sql
 
 ## §6 Taking a manual backup
 
+> **`ibsng-ops.sh` → option 5.** Runs the sanity check automatically
+> and reports lines/COPY-count/size.
+
 ```bash
 TS=$(date +%Y%m%d_%H%M%S)
 OUT="/root/backups/manual/ibsng_manual_${TS}.sql"   # outside the container — survives a recreate
@@ -212,6 +231,10 @@ grep -c '^COPY' "$OUT"      # should be > 0 (51 on both production servers as of
 ```
 
 ## §7 Diagnosing "Can't connect to IBS Core" / silent failures
+
+> Not in `ibsng-ops.sh` — this one needs judgment about which method/
+> params to test, not a fixed procedure a menu item can drive. Manual
+> only, for now.
 
 IBSng's own error handling shows this generic message (or a bare
 HTTP 500) for almost **any** XML-RPC fault, not just real connectivity
@@ -243,6 +266,9 @@ the bug is elsewhere.
 
 ## §8 SSL certificate status
 
+> **`ibsng-ops.sh` → option 7.** Auto-detects which domain lives on
+> this host instead of you having to remember Active vs Passive.
+
 Run on the host, not inside the container — certbot manages certs at
 the host level (see `HA.md`'s SSL section for the full design).
 
@@ -270,6 +296,9 @@ the full explanation. To test the renewal path without actually
 renewing anything: `certbot renew --dry-run`.
 
 ## §9 Log file locations
+
+> **`ibsng-ops.sh` → option 8.** Submenu covering every row below,
+> follow-mode or last-50-lines, no need to remember exact paths.
 
 | What | Where | Notes |
 |---|---|---|

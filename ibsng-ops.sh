@@ -152,7 +152,19 @@ op_status() {
     local http_line
     http_line=$(docker exec "$CONTAINER" wget -qS -O /dev/null http://127.0.0.1/IBSng/admin/ 2>&1 | grep 'HTTP/')
     if echo "$http_line" | grep -q '200'; then
-        ok "Panel responding: ${http_line# }"
+        ok "Panel responding over plain HTTP: ${http_line# }"
+    elif echo "$http_line" | grep -q '301'; then
+        # expected once HTTPS is configured (§8) — plain HTTP correctly
+        # redirects rather than serving the panel directly. Confirm the
+        # redirect target actually works too, not just that it exists.
+        info "Plain HTTP redirects (301) — HTTPS is configured, checking that instead."
+        local https_line
+        https_line=$(docker exec "$CONTAINER" wget -qS -O /dev/null --no-check-certificate https://127.0.0.1/IBSng/admin/ 2>&1 | grep 'HTTP/')
+        if echo "$https_line" | grep -q '200'; then
+            ok "Panel responding over HTTPS: ${https_line# }"
+        else
+            err "HTTP redirects to HTTPS, but HTTPS itself isn't responding as expected: ${https_line:-<no response>}"
+        fi
     else
         err "Panel not responding as expected: ${http_line:-<no response>}"
     fi
