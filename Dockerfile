@@ -388,6 +388,42 @@ RUN a2enconf ibsng \
 COPY files/ibsng-ssl.conf.template files/ibsng-http-redirect.conf /etc/apache2/sites-available/
 RUN a2enmod ssl
 
+# 12) core/admin/admin.py's Admin.deposit has no stable numeric type
+#    across the daemon's own lifetime, which crashes deleting a user
+#    with positive credit if any admin's deposit has *ever* been
+#    touched by the "Change Deposit" admin-panel feature first in the
+#    same daemon run. REPRODUCED via the Telegram bot integration this
+#    repo also maintains: user.delUser threw "unsupported operand
+#    type(s) for += 'float' and 'decimal.Decimal'" from
+#    Admin.changeDeposit's `self.deposit += deposit_change` — the user
+#    was still actually deleted (the exception is in code that runs
+#    strictly after the deleting SQL already committed), so this isn't
+#    silent data loss, but it is a real, reproducible daemon-side
+#    exception. Root cause: Admin.__init__ (a few lines above
+#    changeDeposit in this same file) forces the initial value through
+#    integer(deposit), a plain-int truncating helper — but
+#    admin_actions.py's changeDeposit() (the admin-panel "Change
+#    Deposit" feature) explicitly validates and passes its argument as
+#    a Python float (see its own isFloat(deposit_change) check and
+#    "deposit_change(float)" docstring a few lines above that call),
+#    while user_actions.py's delUser() computes its refund from
+#    getCredit(), which — like every other NUMERIC column PyGreSQL
+#    returns, see the xmlrpclib Decimal-marshalling fix earlier in
+#    this file — comes back as decimal.Decimal. Once a "Change
+#    Deposit" call has run once against a given admin in the daemon's
+#    current lifetime, self.deposit silently becomes a Python float
+#    (int += float -> float) and stays that way in memory until the
+#    daemon restarts; the next delUser refund against that same admin
+#    then does `float += Decimal`, the one numeric combination Python
+#    doesn't support (int += Decimal works fine, via Decimal's own
+#    __radd__). Fixed by normalizing both sides of the += through
+#    Decimal on every call, regardless of whatever type self.deposit
+#    currently happens to be — this is the one method that ever
+#    mutates self.deposit in place, so fixing it here is sufficient
+#    without touching every caller or the constructor.
+RUN sed -i '1i import decimal' /usr/local/IBSng/core/admin/admin.py \
+    && sed -i 's/self\.deposit+=deposit_change/self.deposit=decimal.Decimal(str(self.deposit))+decimal.Decimal(str(deposit_change))/' /usr/local/IBSng/core/admin/admin.py
+
 COPY files/setup.exp /usr/local/IBSng/scripts/setup.exp
 COPY files/entrypoint.sh /entrypoint.sh
 COPY files/unattended-answers.txt /usr/local/IBSng/scripts/unattended-answers.txt
