@@ -424,6 +424,97 @@ RUN a2enmod ssl
 RUN sed -i '1i import decimal' /usr/local/IBSng/core/admin/admin.py \
     && sed -i 's/self\.deposit+=deposit_change/self.deposit=decimal.Decimal(str(self.deposit))+decimal.Decimal(str(deposit_change))/' /usr/local/IBSng/core/admin/admin.py
 
+# 13) ocserv (Cisco AnyConnect/OpenConnect VPN gateway, configured as a
+#    RAS of type "pppd" -- there is no real PPP protocol involved, "pppd"
+#    is just this RAS type's name in IBSng) reassigns NAS-Port on every
+#    RADIUS interim accounting update it sends, rather than keeping one
+#    stable port for the life of a session. Confirmed via packet capture
+#    against a real connection: a single continuous VPN session reported
+#    a steadily incrementing NAS-Port on every update, alongside a
+#    correctly growing Acct-Session-Time and Acct-Input/Output-Octets --
+#    i.e. the underlying connection genuinely never dropped, only the
+#    accounting identifier churned. core/ras/rases/pppd.py's isOnline()
+#    keys its online-tracking dict by NAS-Port, so every one of these
+#    non-events looked exactly like the user reconnecting under a new
+#    session, which piled up MultiLogin-rejected duplicate logins until
+#    the user was force-logged-out and vanished from the online list --
+#    while remaining actually connected and passing traffic the whole
+#    time. Several more bugs, each masking the next until fixed:
+#      - core/ras/rases/pppd.py's old fix attempt (tearing down and
+#        re-logging-in the instance on every port change) reset the
+#        visible session duration every ~60-90s and discarded/duplicated
+#        billed usage each cycle -- replaced with an in-place remap of
+#        the existing login instance to the new port (see
+#        __remapStalePortForUser and online.py's new remapUniqueId
+#        below), which preserves login_time and adopts the packet's own
+#        cumulative byte counters instead of restarting from zero.
+#      - core/charge/internet_charge.py: two separate instances of the
+#        same Decimal/float bug documented for admin.py above (fix #12)
+#        -- effective_rule.cpm and .cpk are Decimal (Postgres NUMERIC
+#        columns via PyGreSQL), and Python 2's Decimal refuses to divide
+#        by a plain float literal. `cpm / 60.0` in checkLimits() crashed
+#        every single reonline attempt's post-auth credit check
+#        (silently caught by ras.py's tryToReOnline, so the reonline
+#        never actually completed); `cpk * (...) / 1024.0` in
+#        calcInstanceRuleCreditUsage() is the same bug on any charge plan
+#        with a nonzero per-KB rate (didn't fire against the plan used to
+#        diagnose this, which happened to have cpk=0.00, but confirmed
+#        via code inspection to be the identical bug). Both fixed the
+#        same way as fix #12: use a plain int divisor instead of a float
+#        one -- numerically identical, and Decimal/int works fine.
+#      - core/ras/rases/pppd.py's __addInOnlines hardcoded a freshly
+#        tracked port's running byte counters to 0 instead of seeding
+#        them from the packet's own Acct-Input/Output-Octets (which it
+#        already parses into start_in_bytes/start_out_bytes, but then
+#        never uses) -- meant the running counters only ever got a real
+#        value via a separate interim-update code path that, given the
+#        NAS-Port churn above, was never reached in practice, so tracked
+#        traffic stayed at 0 for the life of the (endlessly-recreated)
+#        instance.
+#      - the "Stop" branch's final-byte-count handling wrote into
+#        self.inouts[port], a dict nothing else populates for a RAS like
+#        ocserv (getInOuts()'s CLI script targets local ppp* interfaces
+#        on the IBSng host itself, meaningless here) -- every write threw
+#        a KeyError that was silently swallowed, so a real disconnect's
+#        logged connection always showed 0 traffic even when self.onlines
+#        held correct live totals moments before. Fixed by seeding
+#        self.onlines directly from the Stop packet's own reported
+#        totals, which getInOutBytes() actually reads.
+#      - core/user/plugins/charge.py's ChargeUserPlugin.login() sets
+#        instance_info["start_accounting"] (a top-level key, deliberately
+#        excluded from instance_info["attrs"] by user.py's
+#        remove_ras_attrs list -- it lives alongside the plaintext
+#        password fields there) as the signal that
+#        getInOutBytes()/accountingStarted() should actually query live
+#        byte counts; this part of the mechanism was already correct and
+#        untouched, but is exactly why any attempted fix that checks
+#        instance_info["attrs"] instead of instance_info itself for this
+#        key silently returns zero bytes forever, regardless of what's
+#        actually tracked -- documented here because it's an easy trap to
+#        fall back into.
+#    Also: ocserv's own accounting client occasionally resends a
+#    duplicate/late Interim-Update for a port that a newer update has
+#    already superseded; __remapStalePortForUser (a stock, no-op-safe
+#    scan) now always drops a stale self.onlines entry once a remap
+#    attempt against it fails, rather than only on success, so a late
+#    duplicate can't keep getting mis-picked by every subsequent packet
+#    forever.
+#    core/ras/rases/pppd.py is heavily restructured by this fix (new
+#    __remapStalePortForUser method, rewritten Alive/Stop accounting
+#    branches, isOnline() and __addInOnlines() changes throughout) --
+#    shipped as a full-file replacement rather than a sequence of sed
+#    patches against assumed original text, since the number and size of
+#    the changes made line-anchored patching both harder to verify and
+#    more brittle against upstream formatting than just testing and
+#    shipping the known-good file directly.
+COPY files/pppd.py /usr/local/IBSng/core/ras/rases/pppd.py
+COPY files/patches/add_remap_unique_id.py /tmp/patches/add_remap_unique_id.py
+RUN python2.7 /tmp/patches/add_remap_unique_id.py \
+    && rm -rf /tmp/patches \
+    && sed -i 's/effective_rule\.cpm \/ 60\.0 + \\/effective_rule.cpm \/ 60 + \\/' /usr/local/IBSng/core/charge/internet_charge.py \
+    && sed -i 's/effective_rule\.calcRuleTransferUsage(user_obj,instance)) \/ 1024\.0/effective_rule.calcRuleTransferUsage(user_obj,instance)) \/ 1024/' /usr/local/IBSng/core/charge/internet_charge.py \
+    && python2.7 -m py_compile /usr/local/IBSng/core/ras/rases/pppd.py /usr/local/IBSng/core/user/online.py /usr/local/IBSng/core/charge/internet_charge.py
+
 COPY files/setup.exp /usr/local/IBSng/scripts/setup.exp
 COPY files/entrypoint.sh /entrypoint.sh
 COPY files/unattended-answers.txt /usr/local/IBSng/scripts/unattended-answers.txt
