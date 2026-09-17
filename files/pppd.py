@@ -253,9 +253,20 @@ class PPPDRas(GeneralUpdateRas):
         self.__addUniqueIdToRasMsg(ras_msg)
         if status_type=="Start":
 
-            ras_msg.setInAttrs({"User-Name":"username", "Framed-IP-Address":"remote_ip", "Acct-Session-Id":"session_id"})
+            ras_msg.setInAttrs({"User-Name":"username", "Acct-Session-Id":"session_id"})
+            # Some ocserv versions don't echo Framed-IP-Address back in
+            # their own Accounting-Start, even though IBSng already
+            # assigned it during the preceding Access-Accept -- confirmed
+            # live against Pishgaman's ocserv 1.2.4. Farzanegan's older
+            # ocserv (0.12.6) does send it, so keep that path unchanged
+            # and only skip "remote_ip" from update_attrs when it's
+            # genuinely absent, rather than crashing the whole Start.
+            ras_msg.setInAttrsIfExists({"Framed-IP-Address":"remote_ip"})
             ras_msg["start_accounting"]=True
-            ras_msg["update_attrs"]=["remote_ip", "start_accounting"]
+            update_attrs=["start_accounting"]
+            if ras_msg.hasAttr("remote_ip"):
+                update_attrs.append("remote_ip")
+            ras_msg["update_attrs"]=update_attrs
 
             self.__addInOnlines(ras_msg)
 
