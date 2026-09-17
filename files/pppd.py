@@ -136,7 +136,36 @@ class PPPDRas(GeneralUpdateRas):
 ####################################
     def __addUniqueIdToRasMsg(self, ras_msg):
         ras_msg["unique_id"]="port"
-        ras_msg["port"]=str(ras_msg.getRequestPacket()["NAS-Port"][0])
+        pkt = ras_msg.getRequestPacket()
+        if pkt.has_key("NAS-Port"):
+            ras_msg["port"] = str(pkt["NAS-Port"][0])
+        elif pkt.has_key("Acct-Session-Id"):
+            # Some ocserv versions never send NAS-Port at all -- confirmed
+            # via ocserv's own upstream source (src/auth/radius.c sends
+            # NAS-Port-Type unconditionally but never builds a NAS-Port
+            # attribute anywhere) and a matching, still-open upstream
+            # report (GitLab openconnect/ocserv#320). Not a config gap on
+            # either the client or IBSng side -- there is nothing to turn
+            # back on. Acct-Session-Id is ocserv's own client-chosen
+            # session identifier, present and stable across every
+            # Start/Alive/Stop of one accounting session, so it's a
+            # correct substitute unique key for exactly this case. Ports
+            # derived from real NAS-Port values are plain numeric strings
+            # (see the branch above), so the "acctsid-" prefix here can
+            # never collide with one.
+            ras_msg["port"] = "acctsid-" + str(pkt["Acct-Session-Id"][0])
+        else:
+            # Access-Request phase for a NAS-Port-less client, before any
+            # Acct-Session-Id exists yet (that only appears starting from
+            # Accounting-Start). Nothing session-stable to key on here --
+            # handleRadAuthPacket only uses this port value to
+            # opportunistically reset counters for an already-tracked
+            # port, which is harmless to skip when the session can't be
+            # identified yet.
+            if pkt.has_key("Calling-Station-Id"):
+                ras_msg["port"] = "authonly-" + str(pkt["Calling-Station-Id"][0])
+            else:
+                ras_msg["port"] = "authonly-unknown"
 
     def __remapStalePortForUser(self, username, ras_msg):
         """
