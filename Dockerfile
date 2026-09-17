@@ -515,6 +515,41 @@ RUN python2.7 /tmp/patches/add_remap_unique_id.py \
     && sed -i 's/effective_rule\.calcRuleTransferUsage(user_obj,instance)) \/ 1024\.0/effective_rule.calcRuleTransferUsage(user_obj,instance)) \/ 1024/' /usr/local/IBSng/core/charge/internet_charge.py \
     && python2.7 -m py_compile /usr/local/IBSng/core/ras/rases/pppd.py /usr/local/IBSng/core/user/online.py /usr/local/IBSng/core/charge/internet_charge.py
 
+# 14) Mikrotik RAS users get force-disconnected (a real /ppp or /ip
+#    hotspot "active remove" sent to the router) within ~2 minutes of
+#    every daemon restart, even though their connection on the router
+#    never actually dropped. Root cause: core/ras/rases/mikrotik.py's
+#    self.onlines dict (its only source of truth for isOnline()) is
+#    reset to {} in init(), which runs on every daemon start/restart.
+#    A Mikrotik router only ever sends a RADIUS Accounting "Start"
+#    packet once, at the beginning of a session -- for as long as the
+#    session continues it only sends "Alive" (interim-update) packets.
+#    Before this fix, handleRadAcctPacket's "Alive" branch did nothing
+#    but log a line when the port wasn't already in self.onlines, so
+#    after a restart every currently-connected user's Alive packets
+#    were silently dropped forever. core/user/online.py's
+#    OnlineCheckPeriodicEvent runs every CHECK_ONLINE_INTERVAL (60s by
+#    default) and calls isOnline() for each tracked instance; after
+#    CHECK_ONLINE_MAX_FAILS consecutive failures (2 by default, so
+#    ~2 minutes) it calls __forceLogoutUser, which for this RAS type
+#    means killUser() actually SSHes into the router and removes the
+#    active session -- a real disconnect, not just an admin-panel
+#    display glitch. Confirmed via docker exec + reading
+#    core/user/online.py directly against Active's running container
+#    after a routine 12h cron restart.
+#    Fix, same philosophy as the ocserv/pppd remap fix above: when an
+#    Alive packet arrives for a port missing from self.onlines,
+#    re-register it using that packet's own cumulative byte counters
+#    as the new baseline instead of dropping it -- isOnline() then
+#    reports true again on the very next check, so the router is never
+#    told to kill an otherwise-healthy session. Shipped as a full-file
+#    replacement (files/mikrotik.py) rather than a sed patch, since the
+#    "Alive" branch's byte-count extraction is shared with the new
+#    else-case via a small helper (__getAliveBytes) and multi-line
+#    insertions like this are harder to verify as line-anchored sed.
+COPY files/mikrotik.py /usr/local/IBSng/core/ras/rases/mikrotik.py
+RUN python2.7 -m py_compile /usr/local/IBSng/core/ras/rases/mikrotik.py
+
 COPY files/setup.exp /usr/local/IBSng/scripts/setup.exp
 COPY files/entrypoint.sh /entrypoint.sh
 COPY files/unattended-answers.txt /usr/local/IBSng/scripts/unattended-answers.txt
