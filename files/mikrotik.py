@@ -199,7 +199,7 @@ class MikrotikRas(GeneralUpdateRas):
             ras_msg.setAction("INTERNET_STOP")
 
         elif status_type == "Alive":
-            if ras_msg["port"] in self.onlines:
+            if self.isUserOnline(ras_msg) and ras_msg["port"] in self.onlines:
 
                 now = long(time.time())
 
@@ -216,24 +216,36 @@ class MikrotikRas(GeneralUpdateRas):
 
             else:
                 # The session is still genuinely alive on the router --
-                # only IBSng's own in-memory online-tracking lost track of
-                # it (e.g. a daemon restart cleared self.onlines). A
-                # Mikrotik router only ever sends "Start" once per session
-                # and "Alive" for as long as it continues, so if we just
-                # log and drop this like before, isOnline() keeps failing
-                # every check-online cycle and the user gets force-logged-
-                # out (a real /ppp or /ip hotspot "active remove" sent to
-                # the router) even though nothing is actually wrong.
-                # Re-register the port here instead, seeded from this
-                # packet's own cumulative counters as the new baseline --
-                # same fix philosophy as the ocserv/pppd remap fix.
+                # only IBSng lost track of it (e.g. a daemon restart wiped
+                # both this RAS's local self.onlines AND, more importantly,
+                # core/user/online.py's global online registry -- the one
+                # the admin panel's Online Users page and billing actually
+                # read from). An earlier version of this fix only
+                # repopulated self.onlines directly: that kept isOnline()
+                # happy enough to avoid a force-logout, but never restored
+                # global visibility or billing, so the user vanished from
+                # the Online Users page even though their connection and
+                # the kill-avoidance both worked. Confirmed live against a
+                # real session on Passive. Do a real re-online through the
+                # normal auth pipeline instead -- the same approach the
+                # already-proven ocserv/pppd fix uses
+                # (core/ras/rases/pppd.py's tryToReOnline call) -- so the
+                # global registry, billing, and this RAS's own cache all
+                # get restored together, not just the local one.
                 username = ras_msg.getRequestAttr("User-Name")[0]
-                self.toLog("Re-registering %s,%s from an Alive packet (missing from online list, likely after a daemon restart)"%(username, ras_msg["port"]))
-                in_bytes, out_bytes = self.__getAliveBytes(ras_msg)
-                self.onlines[ras_msg["port"]] = {"username":username, "in_bytes":in_bytes, "out_bytes":out_bytes,
-                                                  "in_rate":0, "out_rate":0, "last_update":long(time.time())}
+                self.toLog("Re-onlining %s,%s from an Alive packet (not in the global online registry, likely after a daemon restart)"%(username, ras_msg["port"]))
+                self.tryToReOnline(ras_msg)
         else:
             self.toLog("handleRadAcctPacket: invalid status_type %s"%status_type, LOG_ERROR)
+
+####################################
+    def tryToReOnlineResult(self, ras_msg, auth_success):
+        if auth_success:
+            in_bytes, out_bytes = self.__getAliveBytes(ras_msg)
+            self.onlines[ras_msg["port"]] = {"username":ras_msg["username"], "in_bytes":in_bytes, "out_bytes":out_bytes,
+                                              "in_rate":0, "out_rate":0, "last_update":long(time.time())}
+        else:
+            self.toLog("Re-online failed for %s,%s"%(ras_msg["username"], ras_msg["port"]), LOG_ERROR)
 
 ####################################
     def _reload(self):
