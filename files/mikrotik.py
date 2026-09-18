@@ -107,8 +107,22 @@ class MikrotikRas(GeneralUpdateRas):
             self.inouts=inouts
 ####################################
     def isOnline(self, user_msg):
-        return self.onlines.has_key(user_msg["port"]) and self.onlines[user_msg["port"]]["last_update"] >= \
-                                    time.time() - int(self.getAttribute("mikrotik_update_accounting_interval"))*60
+        port = user_msg["port"]
+        if not self.onlines.has_key(port):
+            return False
+        # 1.5x margin over the nominal interim-update interval, same fix
+        # already applied to pppd.py: real-world RADIUS delivery has
+        # observed jitter beyond the nominal interval, so a zero-margin
+        # threshold false-triggers the online-check (and a spurious
+        # force-logout/killUser) on ordinary delivery delay, not just a
+        # genuinely dead session. Confirmed via 33 real "Maximum Check
+        # Online Fails Reached" events against legitimate, actively-
+        # connected Mikrotik users over ~30 hours with no daemon restart
+        # in between -- ruling out the already-fixed post-restart
+        # scenario as the cause.
+        age = time.time() - self.onlines[port]["last_update"]
+        threshold = int(self.getAttribute("mikrotik_update_accounting_interval")) * 60 * 1.5
+        return age <= threshold
 ####################################
     def getInOutBytes(self, user_msg):
         try:
