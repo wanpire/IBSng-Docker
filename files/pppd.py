@@ -226,6 +226,57 @@ class PPPDRas(GeneralUpdateRas):
 
         return True
 
+    def __remapAuthOnlyEntryForUser(self, username, ras_msg):
+        """
+            Bridges the synthetic "authonly-<calling-station-id>" key
+            handleRadAuthPacket seeds for a NAS-Port-less client (nothing
+            session-stable exists yet at the auth phase, before
+            Acct-Session-Id is assigned) forward to the real
+            "acctsid-<session-id>" key __addUniqueIdToRasMsg computes once
+            Accounting-Start arrives. Without this, the auth phase's own
+            persistent global registration (from INTERNET_AUTHENTICATE)
+            and the Start's registration would use two different keys for
+            the same real session -- confirmed live: this produced a
+            spurious duplicate-login conflict on Start, then a real
+            multi-minute delay while the orphaned auth-phase entry died of
+            staleness before pppd_reonline_users's own recovery silently
+            fixed it. Scoped strictly to "authonly-" keys (see
+            handleRadAuthPacket) so RAS traffic that does have NAS-Port
+            (e.g. Farzanegan's) never creates one of these and this is a
+            complete no-op for it, same as __remapStalePortForUser above.
+
+            Returns True if an auth-only entry was found and remapped,
+            False otherwise (caller should fall back to a normal
+            __addInOnlines -- this is genuinely the first packet IBSng
+            has seen for this session, e.g. NAS-Port-less auth failed or
+            was skipped).
+        """
+        stale_port = None
+        for port, info in self.onlines.items():
+            if port.startswith("authonly-") and info["username"] == username:
+                stale_port = port
+                break
+        if stale_port is None:
+            return False
+
+        new_port = ras_msg["port"]
+        try:
+            user_id = user_main.getUserPool().getUserByNormalUsername(username, True).getUserID()
+            remapped = user_main.getOnline().remapUniqueId(user_id, self.getRasID(), stale_port, new_port)
+        except:
+            logException(LOG_ERROR)
+            remapped = False
+
+        if not remapped:
+            if stale_port in self.onlines:
+                del self.onlines[stale_port]
+            return False
+
+        info = self.onlines.pop(stale_port)
+        info["last_update"] = time.time()
+        self.onlines[new_port] = info
+        return True
+
     def handleRadAuthPacket(self, ras_msg):
         self.__addUniqueIdToRasMsg(ras_msg)
         ras_msg.setInAttrs({"User-Name":"username"})
@@ -238,6 +289,16 @@ class PPPDRas(GeneralUpdateRas):
 
         if self.onlines.has_key(ras_msg["port"]):
                 self.onlines[ras_msg["port"]]["in_bytes"], self.onlines[ras_msg["port"]]["out_bytes"]=0, 0
+        elif ras_msg["port"].startswith("authonly-"):
+                # Seed a placeholder so the upcoming Accounting-Start (which
+                # will compute a different, real "acctsid-" key once
+                # Acct-Session-Id exists) can find and remap it via
+                # __remapAuthOnlyEntryForUser, instead of ending up as two
+                # separate registrations for the same real session. Only
+                # ever true for NAS-Port-less clients -- see
+                # __addUniqueIdToRasMsg.
+                self.onlines[ras_msg["port"]] = {"username":ras_msg["username"], "in_bytes":0, "out_bytes":0,
+                                                  "start_in_bytes":0, "start_out_bytes":0, "last_update":time.time()}
 
         if ras_msg.hasAttr("station_ip") and self.getAttribute("pppd_discover_mac_address"):
             ras_msg["mac"]=self.__getClientMacAddress(ras_msg["station_ip"])
@@ -268,7 +329,8 @@ class PPPDRas(GeneralUpdateRas):
                 update_attrs.append("remote_ip")
             ras_msg["update_attrs"]=update_attrs
 
-            self.__addInOnlines(ras_msg)
+            if not self.__remapAuthOnlyEntryForUser(ras_msg["username"], ras_msg):
+                self.__addInOnlines(ras_msg)
 
             ras_msg.setAction("INTERNET_UPDATE")
         elif status_type=="Stop":
