@@ -188,6 +188,20 @@ class MikrotikRas(GeneralUpdateRas):
 
     def handleRadAcctPacket(self, ras_msg):
         status_type=ras_msg.getRequestAttr("Acct-Status-Type")[0]
+        if status_type in ("Accounting-On", "Accounting-Off"):
+            # NAS lifecycle announcement -- a router sends this when its
+            # RADIUS accounting client (re)starts, e.g. right after a
+            # reboot. It carries no User-Name and no NAS-Port at all,
+            # since it isn't about any specific user session.
+            # __addUniqueIdToRasMsg unconditionally reads NAS-Port, so it
+            # must never be called for these two status types. Confirmed
+            # live: a real router reboot sending "Accounting-On" crashed
+            # this handler with a KeyError before it could even reach the
+            # status_type check below. Nothing user-related to do here,
+            # so just log and return -- same as the "invalid status_type"
+            # fallback further down does for any other unrecognized type.
+            self.toLog("Mikrotik Ras %s: %s received"%(self.getRasIP(), status_type), LOG_DEBUG)
+            return
         self.__addUniqueIdToRasMsg(ras_msg)
         if status_type=="Start":
             ras_msg.setInAttrs({"User-Name":"username", "Framed-IP-Address":"remote_ip", "Acct-Session-Id":"session_id"})
