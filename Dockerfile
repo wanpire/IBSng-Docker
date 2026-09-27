@@ -339,6 +339,16 @@ RUN python2.7 /tmp/patches/paginate_online_users.py \
     && printf '\n<div align=center>\n    Total Internet Online Users: {$internet_onlines_total}\n    <br>\n    {reportPages total_results=$internet_onlines_total ignore_in_url="voip_order_by,voip_desc"}\n</div>\n' >> /usr/local/IBSng/interface/smarty/templates/admin/report/internet_onlines.tpl \
     && rm -rf /tmp/patches
 
+# The JavaScript "advanced" Online Users page (online_users.php?js) gets its
+# rows from admin/report/online_users_js.php, which still called
+# GetOnlineUsers with the old 5 arguments. With from/to added above, the
+# missing two became 0 and 0, so the page asked for rows 0..0 and was always
+# empty (SUCCESS, zero rows). It has no pagination of its own, so it asks for
+# rows 0..3000, the XML-RPC maximum per call. The grep fails the build if the
+# stock line ever changes and the sed silently stops matching.
+RUN sed -i 's/^                        intGetConditions());$/                        intGetConditions(), 0, 3000);/' /usr/local/IBSng/interface/IBSng/admin/report/online_users_js.php \
+    && grep -q 'intGetConditions(), 0, 3000);' /usr/local/IBSng/interface/IBSng/admin/report/online_users_js.php
+
 # 10) the SourceForge release tarball ships interface/smarty/templates_c/
 #    pre-populated with Smarty's own compiled-template cache from whenever
 #    the upstream maintainers last rendered these pages themselves —
@@ -556,6 +566,26 @@ RUN python2.7 /tmp/patches/add_remap_unique_id.py \
 #    insertions like this are harder to verify as line-anchored sed.
 COPY files/mikrotik.py /usr/local/IBSng/core/ras/rases/mikrotik.py
 RUN python2.7 -m py_compile /usr/local/IBSng/core/ras/rases/mikrotik.py
+
+# 15) Moving an ONLINE user between groups whose monthly period type differs
+#    (jalali <-> gregorian) left the user stuck online: every later login
+#    was refused and user info, search and check-online all failed with
+#    "list index out of range" until a daemon restart. Root cause in the
+#    stock core/user/plugins/periodic_accounting.py: _reload() on a changed
+#    period value restarted the period and set first_login=True, so the
+#    logout commit INSERTed _usage/_reset rows that already existed; the
+#    duplicate-key failure happened after the logout hooks had popped
+#    instance_start_value, so every later usage calculation raised
+#    IndexError. files/periodic_accounting.py (full-file replacement, ported
+#    unchanged in logic from the WANPIRE deployment where it was found):
+#    a changed value keeps the current period and usage (no free quota
+#    reset), rows are INSERTed only if they don't exist yet (else UPDATE),
+#    and a missing per-instance start value counts as not-counted instead
+#    of raising. Tests: files/test_periodic_accounting.py (8 cases; the
+#    stock file fails several of them).
+COPY files/periodic_accounting.py /usr/local/IBSng/core/user/plugins/periodic_accounting.py
+RUN rm -f /usr/local/IBSng/core/user/plugins/periodic_accounting.pyc /usr/local/IBSng/core/user/plugins/periodic_accounting.pyo \
+    && python2.7 -m py_compile /usr/local/IBSng/core/user/plugins/periodic_accounting.py
 
 COPY files/setup.exp /usr/local/IBSng/scripts/setup.exp
 COPY files/entrypoint.sh /entrypoint.sh
