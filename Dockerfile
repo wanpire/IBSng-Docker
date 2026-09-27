@@ -37,6 +37,13 @@ RUN mkdir -p /usr/share/man/man1 /usr/share/man/man7
 # ("This PHP installation is not configured with the GD library"),
 # which just renders as a broken-image icon in the browser with no
 # obvious error anywhere in the admin panel itself.
+# openssh-client is required for Mikrotik "Kill user": killUser() runs
+# addons/mikrotik/ssh_wrapper, which spawns /usr/bin/ssh via pexpect.
+# jessie-slim ships no ssh client, so without it every kill fails (only
+# an RSHException in ibs_error.log; the panel shows no error) and the
+# session stays up on the router.
+# jessie's OpenSSH 6.7p1 was verified against RouterOS 7.20, 7.21.5 and
+# 7.23.5 as the ibs user on 2026-09-27.
 RUN apt-get install -y --no-install-recommends \
         apache2 \
         libapache2-mod-php5 \
@@ -46,7 +53,7 @@ RUN apt-get install -y --no-install-recommends \
         python-pygresql \
         python-openssl \
         locales tzdata \
-        expect ncurses-base \
+        expect ncurses-base openssh-client \
         wget bzip2 ca-certificates \
         procps net-tools iproute2 sudo \
     && rm -rf /var/lib/apt/lists/*
