@@ -71,7 +71,12 @@ class MikrotikRas(GeneralUpdateRas):
         return user_msg["user_obj"].getTypeObj().getClientAddr(user_msg["instance"])
 
     def __getNasPortType(self, user_msg):
-        return user_msg["instance_info"]["attrs"]["nas_port_type"]
+        # Sessions re-onlined from an Alive packet (after any daemon restart,
+        # e.g. the 04:00 cleanup/sync) carry no nas_port_type in their attrs;
+        # the KeyError was swallowed by killUser's bare except, so every kill
+        # of such a session was a silent no-op. Unknown is treated as PPP,
+        # which is what the else branch of killUser already does.
+        return user_msg["instance_info"]["attrs"].get("nas_port_type")
 
 ####################################
     def __getInOuts(self):
