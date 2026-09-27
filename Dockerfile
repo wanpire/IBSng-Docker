@@ -343,11 +343,17 @@ RUN python2.7 /tmp/patches/paginate_online_users.py \
 # rows from admin/report/online_users_js.php, which still called
 # GetOnlineUsers with the old 5 arguments. With from/to added above, the
 # missing two became 0 and 0, so the page asked for rows 0..0 and was always
-# empty (SUCCESS, zero rows). It has no pagination of its own, so it asks for
-# rows 0..3000, the XML-RPC maximum per call. The grep fails the build if the
-# stock line ever changes and the sed silently stops matching.
-RUN sed -i 's/^                        intGetConditions());$/                        intGetConditions(), 0, 3000);/' /usr/local/IBSng/interface/IBSng/admin/report/online_users_js.php \
-    && grep -q 'intGetConditions(), 0, 3000);' /usr/local/IBSng/interface/IBSng/admin/report/online_users_js.php
+# empty (SUCCESS, zero rows). Full-file copies ported from the WANPIRE
+# deployment: the PHP asks for rows 0..3000 (the XML-RPC maximum per call; the
+# page has no pagination of its own) and adds a per-RAS summary computed over
+# ALL online users (one extra unfiltered call only while a RAS/username filter
+# is active); the template shows it as an "Online Users per RAS" table (click
+# a RAS to show only it) and makes filter changes refresh at once instead of
+# at the next timer tick. templates_c is cleared further down (note 10), so
+# the new template is compiled fresh.
+COPY files/online_users_js.php /usr/local/IBSng/interface/IBSng/admin/report/online_users_js.php
+COPY files/online_users_js.tpl /usr/local/IBSng/interface/smarty/templates/admin/report/online_users_js.tpl
+RUN php5 -l /usr/local/IBSng/interface/IBSng/admin/report/online_users_js.php
 
 # 10) the SourceForge release tarball ships interface/smarty/templates_c/
 #    pre-populated with Smarty's own compiled-template cache from whenever
