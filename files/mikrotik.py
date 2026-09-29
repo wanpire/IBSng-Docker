@@ -223,8 +223,14 @@ class MikrotikRas(GeneralUpdateRas):
                                 "Framed-IP-Address":"remote_ip",
                                 "Acct-Session-Id":"session_id",
                                 "Acct-Output-Octets":"in_bytes",
-                                "Acct-Input-Octets":"out_bytes",
-                                "Acct-Terminate-Cause":"terminate_cause"})
+                                "Acct-Input-Octets":"out_bytes"})
+            # Some MikroTiks send Stop without Acct-Terminate-Cause (seen live
+            # 2026-09-28 08:02 from Farzanegan-Prime). As a required attr it
+            # raised IBSException, so the session wasn't closed until the
+            # online check caught it ~3 min later, holding the login slot.
+            # Optional here, same as pppd.py; the only consumer
+            # (user/plugins/terminate_cause.py) already checks hasAttr.
+            ras_msg.setInAttrsIfExists({"Acct-Terminate-Cause":"terminate_cause"})
             try:
                 self.inouts[ras_msg["port"]]["in_bytes"], self.inouts[ras_msg["port"]]["out_bytes"]=ras_msg["in_bytes"], ras_msg["out_bytes"]
             except KeyError:

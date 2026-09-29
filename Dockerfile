@@ -570,6 +570,11 @@ RUN python2.7 /tmp/patches/add_remap_unique_id.py \
 #    "Alive" branch's byte-count extraction is shared with the new
 #    else-case via a small helper (__getAliveBytes) and multi-line
 #    insertions like this are harder to verify as line-anchored sed.
+#    Also in this file: a Stop packet without Acct-Terminate-Cause (some
+#    MikroTiks send one) raised IBSException, so the session stayed open
+#    until the online check closed it ~3 minutes later, holding the user's
+#    login slot. The attribute is now optional, as it already is in pppd.py.
+#    Tests: files/test_mikrotik_stop.py (4 cases; the old file fails case 1).
 COPY files/mikrotik.py /usr/local/IBSng/core/ras/rases/mikrotik.py
 RUN python2.7 -m py_compile /usr/local/IBSng/core/ras/rases/mikrotik.py
 
